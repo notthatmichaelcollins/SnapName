@@ -1,21 +1,25 @@
 package com.example.snapname
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ContentValues
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.ColorFilter
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.OrientationEventListener
 import android.widget.ImageButton
-import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.FrameLayout
-import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -37,7 +41,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var camera: LifecycleCameraController
     private lateinit var status: TextView
     private lateinit var shutter: ImageButton
-    private lateinit var sizeButton: Button
+    private lateinit var sizeTabs: List<TextView>
     private lateinit var root: FrameLayout
 
     // Long side divided by short side
@@ -69,6 +73,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep the layout fixed to the phone; labels are rotated separately
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         preview = PreviewView(this)
         status = TextView(this).apply {
             setTextColor(-1)
@@ -85,27 +91,29 @@ class MainActivity : ComponentActivity() {
         }
         selectedRatio = getPreferences(MODE_PRIVATE).getString("ratio", null)
             ?.takeIf { it in ratios } ?: "4:3"
-        sizeButton = Button(this).apply {
-            text = selectedRatio
-            setOnClickListener { showSizeMenu() }
-        }
+        val tabStrip = createSizeTabs()
         root = FrameLayout(this).apply {
             fitsSystemWindows = true
             setBackgroundColor(0xFF000000.toInt())
             addView(preview, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
-            addView(status, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+            addView(status, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
             addView(shutter, FrameLayout.LayoutParams(dp(80), dp(80),
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = 64 })
-            addView(sizeButton, FrameLayout.LayoutParams(-2, -2,
-                Gravity.BOTTOM or Gravity.START).apply {
-                    leftMargin = dp(16)
-                    bottomMargin = 64 + dp(16)
+            addView(tabStrip, FrameLayout.LayoutParams(-2, -2,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                    bottomMargin = 64 + dp(92)
                 })
         }
         // Resize the preview once the screen size is known, and if it changes
         root.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
-            if (r - l != oldR - oldL || b - t != oldB - oldT) root.post { applyRatio() }
+            if (r - l != oldR - oldL || b - t != oldB - oldT) root.post {
+                applyRatio()
+                status.maxWidth = root.width - dp(32)
+                placeStatus()
+            }
         }
+        // Reposition the message whenever its text changes its size
+        status.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeStatus() }
         setContentView(root)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -115,19 +123,117 @@ class MainActivity : ComponentActivity() {
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-    private fun showSizeMenu() {
-        PopupMenu(this, sizeButton).apply {
-            ratios.keys.forEach { menu.add(it) }
-            setOnMenuItemClickListener { item ->
-                selectedRatio = item.title.toString()
-                sizeButton.text = selectedRatio
-                getPreferences(MODE_PRIVATE).edit()
-                    .putString("ratio", selectedRatio).apply()
-                applyRatio()
-                true
-            }
-            show()
+    // A row of sizes: tap one, or swipe along the row to move between them
+    @SuppressLint("ClickableViewAccessibility")
+    private fun createSizeTabs(): LinearLayout {
+        val strip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(0x99000000.toInt())
         }
+        var downX = 0f
+        sizeTabs = ratios.keys.map { name ->
+            TextView(this).apply {
+                text = name
+                textSize = 14f
+                gravity = Gravity.CENTER
+                maxLines = 1
+                setOnClickListener { selectSize(name) }
+                setOnTouchListener { view, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            downX = event.rawX
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            val moved = event.rawX - downX
+                            if (!view.isEnabled) {
+                                // Ignore touches while a photo is saving
+                            } else if (kotlin.math.abs(moved) > dp(24)) {
+                                // Swipe left for the next size, right for the previous one
+                                stepSize(if (moved < 0) 1 else -1)
+                            } else {
+                                view.performClick()
+                            }
+                        }
+                    }
+                    true
+                }
+                // Square cells leave room for the label to rotate
+                strip.addView(this, LinearLayout.LayoutParams(dp(60), dp(60)))
+            }
+        }
+        highlightSize()
+        return strip
+    }
+
+    private fun stepSize(step: Int) {
+        val names = ratios.keys.toList()
+        val index = (names.indexOf(selectedRatio) + step).coerceIn(0, names.lastIndex)
+        selectSize(names[index])
+    }
+
+    private fun selectSize(name: String) {
+        if (name == selectedRatio) return
+        selectedRatio = name
+        getPreferences(MODE_PRIVATE).edit().putString("ratio", name).apply()
+        highlightSize()
+        applyRatio()
+    }
+
+    private fun highlightSize() {
+        sizeTabs.forEach {
+            val selected = it.text.toString() == selectedRatio
+            it.isSelected = selected
+            it.setTextColor(if (selected) 0xFFFFD54F.toInt() else -1)
+            it.typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        }
+    }
+
+    // How far to turn labels so they read upright: 0, 90 or -90 degrees
+    private var labelAngle = 0
+
+    private val orientationListener by lazy {
+        object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                // Gaps between the ranges stop flickering near 45 degrees.
+                // Flat and upside-down positions keep the previous angle.
+                val angle = when (orientation) {
+                    in 0..30, in 330..359 -> 0
+                    in 60..120 -> -90
+                    in 240..300 -> 90
+                    else -> return
+                }
+                if (angle == labelAngle) return
+                labelAngle = angle
+                sizeTabs.forEach {
+                    it.animate().rotation(angle.toFloat()).setDuration(200).start()
+                }
+                placeStatus()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        orientationListener.enable()
+    }
+
+    override fun onPause() {
+        orientationListener.disable()
+        super.onPause()
+    }
+
+    // Move the message to whichever edge is currently at the top for the viewer
+    private fun placeStatus() {
+        val width = root.width - root.paddingLeft - root.paddingRight
+        val height = root.height - root.paddingTop - root.paddingBottom
+        status.rotation = labelAngle.toFloat()
+        status.translationX = when (labelAngle) {
+            -90 -> -(width - status.height) / 2f
+            90 -> (width - status.height) / 2f
+            else -> 0f
+        }
+        status.translationY =
+            if (labelAngle == 0) -(height - status.height) / 2f else 0f
     }
 
     // The camera crops each photo to match the shape of the preview
@@ -157,7 +263,7 @@ class MainActivity : ComponentActivity() {
 
     private fun takePhoto() {
         shutter.isEnabled = false
-        sizeButton.isEnabled = false
+        sizeTabs.forEach { it.isEnabled = false }
         status.text = "Saving…"
         val stamp = SimpleDateFormat("yyMMdd_HHmm", Locale.US).format(Date())
 
@@ -175,7 +281,7 @@ class MainActivity : ComponentActivity() {
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                     shutter.isEnabled = true
-                    sizeButton.isEnabled = true
+                    sizeTabs.forEach { it.isEnabled = true }
                     val uri = result.savedUri
                     if (uri == null) status.text = "Saved as photo_$stamp.jpg"
                     else describeAndRename(uri, stamp)
@@ -183,7 +289,7 @@ class MainActivity : ComponentActivity() {
 
                 override fun onError(e: ImageCaptureException) {
                     shutter.isEnabled = true
-                    sizeButton.isEnabled = true
+                    sizeTabs.forEach { it.isEnabled = true }
                     status.text = "Capture failed: ${e.message}"
                 }
             })
