@@ -13,7 +13,9 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Gravity
 import android.widget.ImageButton
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -35,6 +37,18 @@ class MainActivity : ComponentActivity() {
     private lateinit var camera: LifecycleCameraController
     private lateinit var status: TextView
     private lateinit var shutter: ImageButton
+    private lateinit var sizeButton: Button
+    private lateinit var root: FrameLayout
+
+    // Long side divided by short side
+    private val ratios = linkedMapOf(
+        "4:3" to 4f / 3f,
+        "3:2" to 3f / 2f,
+        "16:10" to 16f / 10f,
+        "16:9" to 16f / 9f,
+        "1:1" to 1f
+    )
+    private var selectedRatio = "4:3"
 
     private val labeler by lazy {
         ImageLabeling.getClient(
@@ -69,12 +83,28 @@ class MainActivity : ComponentActivity() {
             isEnabled = false
             setOnClickListener { takePhoto() }
         }
-        val root = FrameLayout(this).apply {
+        selectedRatio = getPreferences(MODE_PRIVATE).getString("ratio", null)
+            ?.takeIf { it in ratios } ?: "4:3"
+        sizeButton = Button(this).apply {
+            text = selectedRatio
+            setOnClickListener { showSizeMenu() }
+        }
+        root = FrameLayout(this).apply {
             fitsSystemWindows = true
-            addView(preview, FrameLayout.LayoutParams(-1, -1))
+            setBackgroundColor(0xFF000000.toInt())
+            addView(preview, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
             addView(status, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
             addView(shutter, FrameLayout.LayoutParams(dp(80), dp(80),
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = 64 })
+            addView(sizeButton, FrameLayout.LayoutParams(-2, -2,
+                Gravity.BOTTOM or Gravity.START).apply {
+                    leftMargin = dp(16)
+                    bottomMargin = 64 + dp(16)
+                })
+        }
+        // Resize the preview once the screen size is known, and if it changes
+        root.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
+            if (r - l != oldR - oldL || b - t != oldB - oldT) root.post { applyRatio() }
         }
         setContentView(root)
 
@@ -84,6 +114,38 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    private fun showSizeMenu() {
+        PopupMenu(this, sizeButton).apply {
+            ratios.keys.forEach { menu.add(it) }
+            setOnMenuItemClickListener { item ->
+                selectedRatio = item.title.toString()
+                sizeButton.text = selectedRatio
+                getPreferences(MODE_PRIVATE).edit()
+                    .putString("ratio", selectedRatio).apply()
+                applyRatio()
+                true
+            }
+            show()
+        }
+    }
+
+    // The camera crops each photo to match the shape of the preview
+    private fun applyRatio() {
+        val maxWidth = root.width - root.paddingLeft - root.paddingRight
+        val maxHeight = root.height - root.paddingTop - root.paddingBottom
+        if (maxWidth <= 0 || maxHeight <= 0) return
+
+        val ratio = ratios.getValue(selectedRatio)
+        val widthOverHeight = if (maxHeight >= maxWidth) 1f / ratio else ratio
+        var width = maxWidth
+        var height = (width / widthOverHeight).toInt()
+        if (height > maxHeight) {
+            height = maxHeight
+            width = (height * widthOverHeight).toInt()
+        }
+        preview.layoutParams = FrameLayout.LayoutParams(width, height, Gravity.CENTER)
+    }
 
     private fun startCamera() {
         camera = LifecycleCameraController(this)
@@ -95,6 +157,7 @@ class MainActivity : ComponentActivity() {
 
     private fun takePhoto() {
         shutter.isEnabled = false
+        sizeButton.isEnabled = false
         status.text = "Saving…"
         val stamp = SimpleDateFormat("yyMMdd_HHmm", Locale.US).format(Date())
 
@@ -112,6 +175,7 @@ class MainActivity : ComponentActivity() {
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                     shutter.isEnabled = true
+                    sizeButton.isEnabled = true
                     val uri = result.savedUri
                     if (uri == null) status.text = "Saved as photo_$stamp.jpg"
                     else describeAndRename(uri, stamp)
@@ -119,6 +183,7 @@ class MainActivity : ComponentActivity() {
 
                 override fun onError(e: ImageCaptureException) {
                     shutter.isEnabled = true
+                    sizeButton.isEnabled = true
                     status.text = "Capture failed: ${e.message}"
                 }
             })
