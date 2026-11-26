@@ -25,6 +25,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camerax")
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
+    implementation("androidx.camera:camera-extensions:$camerax")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
     // Bundled model: works offline from first launch
